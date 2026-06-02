@@ -1,0 +1,199 @@
+# ========================================
+# Unity Auto-Generated Files
+# ========================================
+Library/
+Temp/
+obj/
+Logs/
+UserSettings/
+
+# Build outputs
+Build/
+Builds/
+*.exe
+*.apk
+*.obb
+
+# ========================================
+# IDE & Editor Files
+# ========================================
+
+# Visual Studio
+.vs/
+.vscode/
+*.sln
+*.csproj
+*.csproj.user
+*.csproj.meta
+
+# JetBrains Rider
+.idea/
+*.swp
+*.swo
+*~
+
+# MonoDevelop
+.monodevelop/
+*.userprefs
+
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# ========================================
+# OS Files
+# ========================================
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Mac
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+.Trash-*
+
+# ========================================
+# Package Managers
+# ========================================
+node_modules/
+package-lock.json
+yarn.lock
+
+# ========================================
+# Sensitive/Local Files (DO NOT COMMIT API KEYS!)
+# ========================================
+
+# API Keys and credentials
+.env
+.env.local
+.env.*.local
+config.local.json
+secrets.json
+api_keys.txt
+
+# LLM Configuration with API keys
+**/LLMConfig.asset
+**/LLMConfig.asset.meta
+
+# Local development files
+local_settings.json
+development_config.txt
+
+# ========================================
+# Cache Files
+# ========================================
+*.cache
+*.meta~ (incomplete meta files)
+.gradle/
+.cargo/
+
+# ========================================
+# Generated Files
+# ========================================
+*.dll.mdb
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+*.VC.opendb
+
+# ========================================
+# Test Results
+# ========================================
+test_results/
+Test*.xml
+coverage/
+
+# ========================================
+# Compiled Binaries
+# ========================================
+*.o
+*.a
+*.so
+*.dylib
+bin/
+
+# ========================================
+# Asset Store
+# ========================================
+Assets/AssetStoreTools*
+Assets/Plugins/Editor/JetBrains*
+
+# ========================================
+# Scene Backup Files
+# ========================================
+*~.unity
+
+# ========================================
+# Collaborators
+# ========================================
+ExportedObj/
+*.unitypackage
+.collabignore
+
+# ========================================
+# Logs
+# ========================================
+*.log
+*.logs
+debug.log
+
+# ========================================
+# LFS (Large File Storage)
+# ========================================
+.lfsconfig
+*.lfs
+
+# ========================================
+# Custom Project-Specific
+# ========================================
+
+# Don't ignore these important files
+!ProjectSettings/
+!Packages/manifest.json
+!Packages/packages-lock.json
+!Assets/
+
+# Game saves and temporary data
+Saves/
+SaveData/
+*.save
+*.dat
+*.tmp
+
+# Screenshot and build artifacts
+Screenshots/
+*.png.meta~ (backup meta files)
+
+# ========================================
+# AI/LLM Specific
+# ========================================
+
+# Ollama local models (large files)
+# If using local Ollama, consider this:
+# ollama_models/
+
+# Model caches
+*.model.cache
+model_cache/
+
+# Interaction logs (local testing)
+interaction_log_*.txt
+world_state_*.txt
+
+# ========================================
+# Performance Profiling
+# ========================================
+profiling_data/
+*.profdata
