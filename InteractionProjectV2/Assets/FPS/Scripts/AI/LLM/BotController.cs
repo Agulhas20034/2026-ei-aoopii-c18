@@ -1,198 +1,220 @@
-using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AI;
-using Unity.FPS.Game;
+using Unity.FPS.AI;                       
+using FpsHealth = Unity.FPS.Game.Health;  
 
-namespace Unity.FPS.AI
+
+[RequireComponent(typeof(EnemyController))]
+[RequireComponent(typeof(BotSensor))]
+public class BotController : MonoBehaviour
 {
-   
-    [RequireComponent(typeof(NavMeshAgent))]
-    [RequireComponent(typeof(Health))]
-    [RequireComponent(typeof(Actor))]
-    public class BotController : MonoBehaviour
+    public enum BotAction { Idle, Patrol, Pursue, Engage, Retreat }
+
+    [Header("Identity")]
+    public int botId = 0;
+
+    [Header("Movement")]
+    public float walkSpeed = 4f;
+    public float sprintSpeed = 7f;
+    public float engageRange = 12f;    
+    public float retreatDistance = 12f;
+    public float wanderRadius = 15f;
+    public Transform[] patrolPoints;
+
+    [Header("Combat")]
+    public float fireRange = 25f;
+    [Tooltip("Seconds to keep chasing a target's last-seen spot after losing sight of it.")]
+    public float searchMemory = 4f;
+
+    [Header("Debug")]
+    public bool debugLog = true;
+    public float logInterval = 1f;
+
+    public BotAction CurrentAction { get; private set; } = BotAction.Patrol;
+    public bool IsAlive => _health != null && _health.CurrentHealth > 0f;
+    public float HealthValue => _health != null ? _health.CurrentHealth : 0f;
+    public BotSensor Sensor => _sensor;
+    public int CurrentTargetId { get; private set; } = -1;
+    public bool FiringNow { get; private set; }
+    public string StatusLine { get; private set; } = "init";
+
+    private int _preferredTargetId = -1;
+    private bool _backendRetreat;
+    private bool _backendSprint;
+
+    private EnemyController _enemy;
+    private NavMeshAgent _agent;
+    private FpsHealth _health;
+    private BotSensor _sensor;
+    private int _patrolIndex;
+    private Vector3 _wanderPoint;
+    private bool _hasWander;
+    private Vector3 _lastKnownPos;
+    private float _lastSeenTime = -999f;
+    private float _nextLog;
+
+    void Awake()
     {
-        [Header("Bot Identity")]
-        public int BotId = 0;
+        _enemy = GetComponent<EnemyController>();
+        _agent = GetComponent<NavMeshAgent>();
+        _health = GetComponent<FpsHealth>();
+        _sensor = GetComponent<BotSensor>();
+        if (_agent != null) _agent.updateRotation = false;
+    }
 
-        [Header("Movement")]
-        [Tooltip("Base movement speed")]
-        public float MoveSpeed = 5f;
-        [Tooltip("Sprint speed multiplier")]
-        public float SprintMultiplier = 1.8f;
-        [Tooltip("How fast the bot turns (deg/sec)")]
-        public float TurnSpeed = 200f;
+    public void ApplyCommand(string action, int targetId, bool fire, bool sprint)
+    {
+        _preferredTargetId = targetId;
+        _backendRetreat = ParseAction(action) == BotAction.Retreat;
+        _backendSprint = sprint;
+        if (debugLog)
+            Debug.Log($"[Bot {botId}] CMD action={action} target={targetId} fire={fire} sprint={sprint}", this);
+    }
 
-        [Header("Combat")]
-        [Tooltip("Weapon held by this bot")]
-        public WeaponController Weapon;
-        [Tooltip("Transform used as the eye / muzzle reference")]
-        public Transform EyeTransform;
+    void Update()
+    {
+        if (_agent == null || !_agent.isOnNavMesh) { StatusLine = "no NavMesh!"; return; }
+        if (!IsAlive) { _agent.isStopped = true; StatusLine = "dead"; return; }
 
-        [Header("Detection")]
-        [Tooltip("Layer mask for detecting walls when doing LOS checks")]
-        public LayerMask ObstacleMask;
+        EnemyContact target = ResolveTarget();
+        CurrentTargetId = target != null ? target.id : -1;
 
-        public float CurrentHealth => _health ? _health.CurrentHealth : 0f;
-        public bool  IsAlive       => _health ? _health.CurrentHealth > 0f : false;
-
-        private NavMeshAgent   _agent;
-        private Health         _health;
-        private Actor          _actor;
-        private BotCommandData _currentCmd;
-
-        private float _targetYaw;
-        private float _targetPitch;
-        private bool  _isShooting;
-        private float _shootTimer;
-
-        void Awake()
+        if (target != null)
         {
-            _agent  = GetComponent<NavMeshAgent>();
-            _health = GetComponent<Health>();
-            _actor  = GetComponent<Actor>();
+            _lastKnownPos = target.Position;
+            _lastSeenTime = Time.time;
         }
 
-        void Start()
+        FiringNow = false;
+
+        if (target != null && _backendRetreat)
         {
-            _health.OnDie += OnDie;
-
-            _agent.speed         = MoveSpeed;
-            _agent.angularSpeed  = 0f;  
-            _agent.updateRotation = false;
-
-            _targetYaw = transform.eulerAngles.y;
-
-            BotManager.Instance?.RegisterBot(this);
-            AIServerBridge.Instance?.NotifyBotSpawned(BotId, transform.position);
+            CurrentAction = BotAction.Retreat;
+            Retreat(target);
+            AimAt(target, allowFire: target.hasLOS && target.distance <= fireRange);
         }
-
-        void Update()
+        else if (target != null)
         {
-            if (!IsAlive) return;
-
-            ApplyMovement();
-            ApplyRotation();
-            ApplyShooting();
-        }
-
-        void OnDestroy()
-        {
-            if (_health) _health.OnDie -= OnDie;
-            BotManager.Instance?.UnregisterBot(this);
-        }
-
-
-        public void ReceiveCommand(BotCommandData cmd)
-        {
-            _currentCmd = cmd;
-
-            _targetYaw   = transform.eulerAngles.y + cmd.look_y;
-            _targetPitch = Mathf.Clamp(
-                (EyeTransform ? EyeTransform.localEulerAngles.x : 0f) + cmd.look_x,
-                -40f, 40f);
-
-            _isShooting = cmd.fire;
-        }
-
-        private void ApplyMovement()
-        {
-            if (_currentCmd == null) return;
-
-            float speed = MoveSpeed * (_currentCmd.sprint ? SprintMultiplier : 1f);
-            _agent.speed = speed;
-
-            Vector3 localDir = new Vector3(_currentCmd.move_x, 0f, _currentCmd.move_z);
-            if (localDir.sqrMagnitude > 0.01f)
+            bool clearShot = target.hasLOS && target.distance <= fireRange;
+            if (clearShot)
             {
-                localDir = Vector3.ClampMagnitude(localDir, 1f);
-                Vector3 worldDir = transform.TransformDirection(localDir);
-                Vector3 dest = transform.position + worldDir * speed * Time.deltaTime * 10f;
-
-                if (NavMesh.SamplePosition(dest, out NavMeshHit hit, 2f, NavMesh.AllAreas))
-                    _agent.SetDestination(hit.position);
+                CurrentAction = BotAction.Engage;
+                _agent.speed = walkSpeed;
+                Drive(target.Position, engageRange);        
+                AimAt(target, allowFire: true);              
             }
             else
             {
-                _agent.ResetPath();
+                CurrentAction = BotAction.Pursue;
+                _agent.speed = sprintSpeed;                  
+                Drive(target.Position, 1.5f);
+                AimAt(target, allowFire: false);
+                StatusLine = target.hasLOS ? $"pursue d={target.distance:F1} (out of range)"
+                                           : $"pursue d={target.distance:F1} (no LOS)";
             }
         }
-
-        private void ApplyRotation()
+        else if (Time.time - _lastSeenTime < searchMemory)
         {
-            float currentYaw = transform.eulerAngles.y;
-            float newYaw = Mathf.MoveTowardsAngle(currentYaw, _targetYaw, TurnSpeed * Time.deltaTime);
-            transform.rotation = Quaternion.Euler(0f, newYaw, 0f);
-
-            if (EyeTransform != null)
-            {
-                float currentPitch = EyeTransform.localEulerAngles.x;
-                float newPitch = Mathf.MoveTowardsAngle(currentPitch, _targetPitch, TurnSpeed * Time.deltaTime);
-                EyeTransform.localRotation = Quaternion.Euler(newPitch, 0f, 0f);
-            }
+            CurrentAction = BotAction.Pursue;
+            _agent.speed = sprintSpeed;
+            Drive(_lastKnownPos, 1.5f);
+            StatusLine = "searching last-seen spot";
+        }
+        else
+        {
+            CurrentAction = BotAction.Patrol;
+            _agent.speed = walkSpeed;
+            DoPatrol();
+            StatusLine = "patrolling (no target)";
         }
 
-        private void ApplyShooting()
+        if (debugLog && Time.time >= _nextLog)
         {
-            if (Weapon == null) return;
+            _nextLog = Time.time + logInterval;
+            Debug.Log($"[Bot {botId}] {StatusLine} | {CurrentAction} | seen={_sensor.Current.Count}", this);
+        }
+    }
 
-            if (_isShooting)
+    private EnemyContact ResolveTarget()
+    {
+        if (_preferredTargetId != -1)
+        {
+            var t = _sensor.GetById(_preferredTargetId);
+            if (t != null && t.IsValid) return t;
+        }
+        return _sensor.GetClosest();
+    }
+
+    private void Drive(Vector3 worldPos, float stopDist)
+    {
+        _agent.stoppingDistance = stopDist;
+        _agent.isStopped = false;
+        if (NavMesh.SamplePosition(worldPos, out NavMeshHit hit, 5f, NavMesh.AllAreas))
+            _enemy.SetNavDestination(hit.position);        
+        else
+            _enemy.SetNavDestination(worldPos);
+    }
+
+    private void Retreat(EnemyContact target)
+    {
+        Vector3 away = (transform.position - target.Position).normalized;
+        Vector3 desired = transform.position + away * retreatDistance;
+        _agent.stoppingDistance = 0.5f;
+        _agent.isStopped = false;
+        if (NavMesh.SamplePosition(desired, out NavMeshHit hit, retreatDistance, NavMesh.AllAreas))
+            _enemy.SetNavDestination(hit.position);
+        StatusLine = $"retreating d={target.distance:F1}";
+    }
+
+    private void AimAt(EnemyContact target, bool allowFire)
+    {
+        Vector3 aim = target.AimPoint;
+        _enemy.OrientTowards(target.Position);
+        _enemy.OrientWeaponsTowards(aim);
+        if (allowFire)
+        {
+            FiringNow = _enemy.TryAtack(aim);
+            StatusLine = FiringNow ? $"FIRING d={target.distance:F1}" : $"in range d={target.distance:F1} (weapon cooling)";
+        }
+    }
+
+    private void DoPatrol()
+    {
+        _agent.stoppingDistance = 0.5f;
+        _agent.isStopped = false;
+        bool arrived = !_agent.pathPending && _agent.remainingDistance <= _agent.stoppingDistance + 0.1f;
+
+        if (patrolPoints != null && patrolPoints.Length > 0)
+        {
+            if (arrived || !_agent.hasPath)
             {
-                Weapon.HandleShootInputs(false, true, false); 
-            }
-            else
-            {
-                Weapon.HandleShootInputs(false, false, false);
+                _patrolIndex = (_patrolIndex + 1) % patrolPoints.Length;
+                _enemy.SetNavDestination(patrolPoints[_patrolIndex].position);
             }
         }
-
-
-        public List<Actor> GetNearbyActors(float radius, bool foe)
+        else if (!_hasWander || arrived)
         {
-            var result = new List<Actor>();
-            var allActors = FindObjectsByType<Actor>(FindObjectsSortMode.None);
-
-            if (Time.frameCount % 300 == 0 && BotId == 0)
+            Vector3 random = transform.position + Random.insideUnitSphere * wanderRadius;
+            if (NavMesh.SamplePosition(random, out NavMeshHit hit, wanderRadius, NavMesh.AllAreas))
             {
-                Debug.Log($"=== [Bot {BotId}] ALL ACTORS IN SCENE (at frame {Time.frameCount}) ===");
-                foreach (var actor in allActors)
-                {
-                    float d = Vector3.Distance(transform.position, actor.transform.position);
-                    bool isFoe = actor.Affiliation != _actor.Affiliation;
-                    Debug.Log($"  {actor.name}: aff={actor.Affiliation} isFoe={isFoe} dist={d:F1}m radius={radius}m");
-                }
-                Debug.Log($"=== END ACTOR LIST ===");
+                _wanderPoint = hit.position;
+                _hasWander = true;
+                _enemy.SetNavDestination(_wanderPoint);
             }
-
-            foreach (var actor in allActors)
-            {
-                if (actor == _actor) continue;
-                bool isFoe = actor.Affiliation != _actor.Affiliation;
-                if (isFoe != foe) continue;
-                
-                float distance = Vector3.Distance(transform.position, actor.transform.position);
-                if (distance > radius)
-                    continue;
-                
-                result.Add(actor);
-            }
-
-            if (foe && result.Count > 0)
-            {
-                foreach (var enemy in result)
-                {
-                    Debug.Log($"[Bot {BotId}] DETECTED ENEMY: {enemy.name} (aff={enemy.Affiliation})");
-                }
-            }
-
-            return result;
         }
+    }
 
-        private void OnDie()
+    private BotAction ParseAction(string a)
+    {
+        switch ((a ?? "").ToLowerInvariant())
         {
-            Debug.Log($"[Bot {BotId}] Died");
-            AIServerBridge.Instance?.NotifyBotDied(BotId);
-            _agent.isStopped = true;
-            _isShooting = false;
+            case "engage":
+            case "attack":
+            case "aggressive_attack": return BotAction.Engage;
+            case "pursue":            return BotAction.Pursue;
+            case "retreat":           return BotAction.Retreat;
+            case "patrol":            return BotAction.Patrol;
+            default:                  return BotAction.Idle;
         }
     }
 }

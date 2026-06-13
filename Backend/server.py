@@ -1,382 +1,315 @@
 import asyncio
 import json
 import logging
-import random
 import time
-from dataclasses import dataclass, field, asdict
+import threading
+import queue
+from dataclasses import dataclass, asdict
 from typing import Optional
+
 import httpx
-import websockets
-from websockets.server import WebSocketServerProtocol
+from flask import Flask, request, jsonify
+
 
 HOST = "0.0.0.0"
 PORT = 8765
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "llama3.2"         
-AI_DECISION_INTERVAL = 1.5       
+OLLAMA_MODEL = "llama3.2"
+AI_DECISION_INTERVAL = 0.8   
 BOT_COUNT = 4
+FIRE_RANGE = 25.0           
 LOG_LEVEL = logging.INFO
 
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("BotServer")
 
+app = Flask(__name__)
+app.config["JSON_SORT_KEYS"] = False
 
 
 @dataclass
 class BotState:
     bot_id: int
-    position: dict = field(default_factory=lambda: {"x": 0, "y": 0, "z": 0})
-    rotation: dict = field(default_factory=lambda: {"y": 0})
+    position: dict
+    rotation_y: float = 0.0
     health: float = 100.0
     is_alive: bool = True
-    nearby_enemies: list = field(default_factory=list)
-    nearby_allies: list = field(default_factory=list)
-    last_known_enemy_pos: Optional[dict] = None
+    nearby_enemies: list = None      
+    nearby_allies: list = None
     last_decision_time: float = 0.0
-    current_action: str = "idle"
+
+    def __post_init__(self):
+        if self.position is None:
+            self.position = {"x": 0, "y": 0, "z": 0}
+        if self.nearby_enemies is None:
+            self.nearby_enemies = []
+        if self.nearby_allies is None:
+            self.nearby_allies = []
 
 
 @dataclass
 class BotCommand:
     bot_id: int
-    move_x: float = 0.0       
-    move_z: float = 0.0       
-    look_y: float = 0.0      
-    look_x: float = 0.0       
+    action: str = "patrol"        
+    target_id: int = -1           
     fire: bool = False
-    jump: bool = False
     sprint: bool = False
     action_label: str = "idle"
 
 
+SYSTEM_PROMPT = """You are the tactical brain for one first-person-shooter bot.
+You receive the bot's state and a numbered list of enemies it can see.
+You DO NOT steer movement directly — the game engine handles pathfinding.
+You only choose a high-level action, which enemy to focus, and whether to fire.
 
-SYSTEM_PROMPT = """You are an AI controller for a first-person shooter bot.
-You receive the bot's current game state and must decide what action to take.
-Reply ONLY with a valid JSON object — no explanations, no markdown.
-
-JSON format:
+Reply with ONLY a valid JSON object, no prose, no markdown:
 {
-  "move_x": <float -1 to 1>,
-  "move_z": <float -1 to 1>,
-  "look_y": <float degrees -45 to 45>,
-  "look_x": <float degrees -30 to 30>,
+  "action": "patrol" | "pursue" | "engage" | "retreat" | "idle",
+  "target_index": <int, the Enemy N to focus, or -1 if none>,
   "fire": <bool>,
-  "jump": <bool>,
   "sprint": <bool>,
-  "action_label": <short string describing the action>
+  "action_label": "<short description>"
 }
 
-Guidelines:
-- You MUST engage ALL nearby enemies, not just the first one.
-- Prioritize enemies within attack range (< 15 units) over distant ones.
-- If multiple enemies exist, focus on the closest immediate threat, but remember the others.
-- If enemies are visible, move toward them and fire when in range.
-- If no enemies in range, move toward the closest one.
-- If an enemy is a stationary turret or elevated, prioritize destroying it over mobile enemies.
-- If health < 30%, retreat backward but keep facing enemies.
-- Use sprint=true when advancing on distant enemies, but do not sprint under fire.
-- Fire=true when enemies are within attack distance (roughly < 15 units).
-- Keep look_y and look_x within reasonable ranges to face threats.
+Rules:
+- No enemies visible -> action "patrol", target_index -1, fire false.
+- Enemy visible but far / no clear shot -> "pursue" the closest one, sprint true, fire false.
+- Enemy within fire range AND has line of sight -> "engage", fire true.
+- Pick target_index = the closest immediate threat. Prefer enemies with line of sight.
+- If health < 30 -> "retreat" but keep target_index set so the bot keeps facing it; fire only if it still has a clear shot.
+- Never fire at an enemy without line of sight.
 """
 
 
-async def ask_ollama(bot: BotState, http_client: httpx.AsyncClient) -> BotCommand:
-    """Send bot state to Ollama and get a command back."""
-
-    enemy_list_str = "none"
+def _build_user_prompt(bot: BotState) -> str:
     if bot.nearby_enemies:
-        enemy_lines = []
+        lines = []
         for idx, e in enumerate(bot.nearby_enemies):
-            dist = e.get('distance', 0)
-            angle = e.get('angle', 0)
-            epos = e.get('position', {})
-            enemy_lines.append(
-                f"  Enemy {idx}: dist={dist:.1f}m angle={angle:.0f}° "
-                f"pos=({epos.get('x', 0):.1f},{epos.get('y', 0):.1f},{epos.get('z', 0):.1f})"
+            lines.append(
+                f"  Enemy {idx}: dist={e.get('distance', 0):.1f}m "
+                f"angle={e.get('angle', 0):.0f} deg los={e.get('has_los', False)}"
             )
-        enemy_list_str = "\n".join(enemy_lines)
+        enemy_str = "\n".join(lines)
+    else:
+        enemy_str = "  none"
 
-    user_prompt = f"""
-Bot {bot.bot_id} state:
+    return f"""Bot {bot.bot_id} state:
 - Health: {bot.health:.0f}/100
-- Alive: {bot.is_alive}
-- Position: x={bot.position.get('x', 0):.1f} y={bot.position.get('y', 0):.1f} z={bot.position.get('z', 0):.1f}
-- Facing: {bot.rotation.get('y', 0):.1f}°
-- Nearby enemies ({len(bot.nearby_enemies)} total):
-{enemy_list_str}
-- Nearby allies: {len(bot.nearby_allies)}
-- Last known enemy position: {bot.last_known_enemy_pos or 'unknown'}
+- Fire range: {FIRE_RANGE:.0f}m
+- Enemies visible ({len(bot.nearby_enemies)}):
+{enemy_str}
 
-Decide the bot's next action. Prioritize the most dangerous enemy: closest threats first, but also consider stationary/turret enemies.
-"""
+Choose the action JSON now."""
 
+
+async def ask_ollama(bot: BotState, http: httpx.AsyncClient) -> BotCommand:
     payload = {
         "model": OLLAMA_MODEL,
-        "prompt": user_prompt,
+        "prompt": _build_user_prompt(bot),
         "system": SYSTEM_PROMPT,
         "stream": False,
-        "options": {"temperature": 0.4, "num_predict": 200},
+        "format": "json",  
+        "options": {"temperature": 0.3, "num_predict": 120},
     }
 
     try:
-        resp = await http_client.post(OLLAMA_URL, json=payload, timeout=8.0)
+        resp = await http.post(OLLAMA_URL, json=payload, timeout=8.0)
         resp.raise_for_status()
         raw = resp.json().get("response", "").strip()
-
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
-
         data = json.loads(raw)
-        return BotCommand(
-            bot_id=bot.bot_id,
-            move_x=float(data.get("move_x", 0)),
-            move_z=float(data.get("move_z", 0)),
-            look_y=float(data.get("look_y", 0)),
-            look_x=float(data.get("look_x", 0)),
-            fire=bool(data.get("fire", False)),
-            jump=bool(data.get("jump", False)),
-            sprint=bool(data.get("sprint", False)),
-            action_label=str(data.get("action_label", "ai_move")),
-        )
-
+        return _resolve_command(bot, data)
     except (httpx.RequestError, httpx.HTTPStatusError) as e:
-        log.warning(f"[Bot {bot.bot_id}] Ollama request failed: {e} — using fallback")
-    except (json.JSONDecodeError, KeyError, ValueError) as e:
-        log.warning(f"[Bot {bot.bot_id}] Bad AI response: {e} — using fallback")
+        log.warning(f"[Bot {bot.bot_id}] Ollama failed: {e} -> fallback")
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+        log.warning(f"[Bot {bot.bot_id}] bad AI JSON: {e} -> fallback")
 
     return _fallback_command(bot)
 
 
+def _resolve_command(bot: BotState, data: dict) -> BotCommand:
+    """Turn the LLM's target_index into a concrete target_id, and sanity-check."""
+    action = str(data.get("action", "patrol")).lower()
+    fire = bool(data.get("fire", False))
+    sprint = bool(data.get("sprint", False))
+
+    try:
+        idx = int(data.get("target_index", -1))
+    except (TypeError, ValueError):
+        idx = -1
+
+    target_id = -1
+    enemy = None
+    if 0 <= idx < len(bot.nearby_enemies):
+        enemy = bot.nearby_enemies[idx]
+    elif bot.nearby_enemies:                 
+        enemy = bot.nearby_enemies[0]
+        idx = 0
+
+    if enemy is not None:
+        target_id = int(enemy.get("id", -1))
+        dist = enemy.get("distance", 999)
+        los = bool(enemy.get("has_los", False))
+        in_range = dist <= FIRE_RANGE
+        low_hp = bot.health < 30
+
+       
+        if low_hp and action == "retreat":
+            fire = los and in_range            
+        elif in_range and los:
+            action = "engage"
+            fire = True                       
+        else:
+            action = "pursue"                  
+            fire = False
+    else:
+        action = "patrol"
+        fire = False
+
+    return BotCommand(
+        bot_id=bot.bot_id,
+        action=action,
+        target_id=target_id,
+        fire=fire,
+        sprint=sprint,
+        action_label=str(data.get("action_label", action)),
+    )
+
+
 def _fallback_command(bot: BotState) -> BotCommand:
-    """Rule-based fallback when Ollama is unavailable."""
+    """Deterministic rule-based brain when Ollama is slow/unavailable."""
     if not bot.is_alive:
-        return BotCommand(bot_id=bot.bot_id, action_label="dead")
-
+        return BotCommand(bot_id=bot.bot_id, action="idle", action_label="dead")
     if not bot.nearby_enemies:
-        return BotCommand(
-            bot_id=bot.bot_id,
-            move_z=1.0,
-            look_y=random.uniform(-30, 30),
-            sprint=False,
-            action_label="patrol",
-        )
+        return BotCommand(bot_id=bot.bot_id, action="patrol", action_label="patrol")
 
-    target_enemy = None
-    
-    threats_in_range = [e for e in bot.nearby_enemies if e.get("distance", 99) <= 15]
-    if threats_in_range:
-        target_enemy = min(threats_in_range, key=lambda e: e.get("distance", 99))
-    else:
-        target_enemy = bot.nearby_enemies[0]
-    
-    angle = target_enemy.get("angle", 0)
-    dist = target_enemy.get("distance", 20)
-    
-    if dist < 8:
-        return BotCommand(
-            bot_id=bot.bot_id,
-            move_z=0.2,  
-            look_y=max(-45, min(45, angle)),
-            fire=True,
-            sprint=False,
-            action_label="aggressive_attack",
-        )
-    elif dist < 15:
-        return BotCommand(
-            bot_id=bot.bot_id,
-            move_z=0.6,
-            look_y=max(-45, min(45, angle)),
-            fire=True,
-            sprint=False,
-            action_label="attack",
-        )
-    else:
-        return BotCommand(
-            bot_id=bot.bot_id,
-            move_z=1.0,
-            look_y=max(-45, min(45, angle)),
-            fire=False,
-            sprint=True,
-            action_label="pursue",
-        )
+    target = bot.nearby_enemies[0]  
+    tid = int(target.get("id", -1))
+    dist = target.get("distance", 999)
+    los = target.get("has_los", False)
+    low_hp = bot.health < 30
 
+    if low_hp:
+        return BotCommand(bot_id=bot.bot_id, action="retreat", target_id=tid,
+                          fire=(los and dist <= FIRE_RANGE), action_label="retreat")
+    if dist <= FIRE_RANGE and los:
+        return BotCommand(bot_id=bot.bot_id, action="engage", target_id=tid, fire=True, action_label="engage")
+    return BotCommand(bot_id=bot.bot_id, action="pursue", target_id=tid, sprint=True, action_label="pursue")
 
 
 class BotManager:
     def __init__(self):
-        self.bots: dict[int, BotState] = {
-            i: BotState(bot_id=i) for i in range(BOT_COUNT)
-        }
-        self.http_client = httpx.AsyncClient()
-        self._pending_commands: list[BotCommand] = []
+        self.bots: dict[int, BotState] = {}
+        self.http = httpx.AsyncClient()
+        self._pending: dict[int, BotCommand] = {}
 
     def update_state(self, data: dict):
-        """Apply a game-state update packet from Unity."""
-        msg_type = data.get("type")
-
-        if msg_type == "bot_state":
-            bot_id = data.get("bot_id")
-            if bot_id is not None and bot_id in self.bots:
-                bot = self.bots[bot_id]
-                bot.position = data.get("position", bot.position)
-                bot.rotation = data.get("rotation", bot.rotation)
-                bot.health = data.get("health", bot.health)
-                bot.is_alive = data.get("is_alive", bot.is_alive)
-                bot.nearby_enemies = data.get("nearby_enemies", [])
-                bot.nearby_allies = data.get("nearby_allies", [])
-                if bot.nearby_enemies:
-                    bot.last_known_enemy_pos = bot.nearby_enemies[0].get("position")
-
-        elif msg_type == "game_state":
-            bots_data = data.get("bots", [])
-            for bd in bots_data:
-                bot_id = bd.get("bot_id")
-                if bot_id is not None and bot_id in self.bots:
-                    bot = self.bots[bot_id]
-                    bot.position = bd.get("position", bot.position)
-                    bot.rotation = bd.get("rotation", bot.rotation)
-                    bot.health = bd.get("health", bot.health)
-                    bot.is_alive = bd.get("is_alive", bot.is_alive)
-                    bot.nearby_enemies = bd.get("nearby_enemies", [])
-                    bot.nearby_allies = bd.get("nearby_allies", [])
-
-        elif msg_type == "bot_died":
-            bot_id = data.get("bot_id")
-            if bot_id in self.bots:
-                self.bots[bot_id].is_alive = False
-                log.info(f"[Bot {bot_id}] Died")
-
-        elif msg_type == "bot_spawned":
-            bot_id = data.get("bot_id")
-            if bot_id in self.bots:
-                self.bots[bot_id].is_alive = True
-                self.bots[bot_id].health = 100.0
-                self.bots[bot_id].position = data.get("position", {"x": 0, "y": 0, "z": 0})
-                log.info(f"[Bot {bot_id}] Spawned at {self.bots[bot_id].position}")
+        if data.get("type") != "game_state":
+            return
+        for bd in data.get("bots", []):
+            bid = bd.get("bot_id")
+            if bid is None:
+                continue
+            enemies = bd.get("nearby_enemies_wrapper", {}).get("items", [])
+            self.bots[bid] = BotState(
+                bot_id=bid,
+                position=bd.get("position", {"x": 0, "y": 0, "z": 0}),
+                rotation_y=bd.get("rotation_y", 0.0),
+                health=bd.get("health", 100.0),
+                is_alive=bd.get("is_alive", True),
+                nearby_enemies=enemies,
+                nearby_allies=bd.get("nearby_allies", []),
+                last_decision_time=self.bots[bid].last_decision_time if bid in self.bots else 0.0,
+            )
 
     async def think(self):
-        """Run AI decisions for all bots that need updating."""
         now = time.time()
         tasks = []
         for bot in self.bots.values():
             if not bot.is_alive:
+                self._pending[bot.bot_id] = BotCommand(bot_id=bot.bot_id, action="idle", action_label="dead")
                 continue
             if now - bot.last_decision_time >= AI_DECISION_INTERVAL:
                 bot.last_decision_time = now
                 tasks.append(self._decide(bot))
 
         if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for r in results:
+            for r in await asyncio.gather(*tasks, return_exceptions=True):
                 if isinstance(r, BotCommand):
-                    self._pending_commands.append(r)
+                    self._pending[r.bot_id] = r
                 elif isinstance(r, Exception):
-                    log.error(f"Decision task error: {r}")
+                    log.error(f"decision error: {r}")
 
     async def _decide(self, bot: BotState) -> BotCommand:
-        cmd = await ask_ollama(bot, self.http_client)
-        log.debug(f"[Bot {bot.bot_id}] → {cmd.action_label} | "
-                  f"move=({cmd.move_x:.1f},{cmd.move_z:.1f}) "
-                  f"look_y={cmd.look_y:.1f}° fire={cmd.fire}")
+        cmd = await ask_ollama(bot, self.http)
+        log.info(f"[Bot {bot.bot_id}] -> {cmd.action} target={cmd.target_id} fire={cmd.fire} "
+                 f"enemies_seen={len(bot.nearby_enemies)}")
         return cmd
 
-    def flush_commands(self) -> list[dict]:
-        """Return pending commands and clear the queue."""
-        cmds = [asdict(c) for c in self._pending_commands]
-        self._pending_commands.clear()
-        return cmds
-
-    def spawn_packet(self) -> dict:
-        """Initial packet telling Unity to spawn all 4 bots."""
-        spawn_positions = [
-            {"x": 5,  "y": 0, "z": 5},
-            {"x": -5, "y": 0, "z": 5},
-            {"x": 5,  "y": 0, "z": -5},
-            {"x": -5, "y": 0, "z": -5},
-        ]
-        return {
-            "type": "spawn_bots",
-            "bots": [
-                {"bot_id": i, "position": spawn_positions[i]}
-                for i in range(BOT_COUNT)
-            ],
-        }
+    def latest_commands(self) -> list[dict]:
+        return [asdict(c) for c in self._pending.values()]
 
     async def close(self):
-        await self.http_client.aclose()
+        await self.http.aclose()
 
 
-
-connected_clients: set[WebSocketServerProtocol] = set()
 bot_manager = BotManager()
+state_queue: "queue.Queue[dict]" = queue.Queue()
+result_lock = threading.Lock()
+latest_commands: list[dict] = []
 
 
-async def handle_client(ws: WebSocketServerProtocol):
-    addr = ws.remote_address
-    log.info(f"Unity connected from {addr}")
-    connected_clients.add(ws)
+def run_async_loop():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
-    await ws.send(json.dumps(bot_manager.spawn_packet()))
-    log.info("Sent spawn_bots packet to Unity")
+    async def worker():
+        global latest_commands
+        while True:
+            try:
+                drained = False
+                while True:
+                    try:
+                        bot_manager.update_state(state_queue.get_nowait())
+                        drained = True
+                    except queue.Empty:
+                        break
+                await bot_manager.think()
+                cmds = bot_manager.latest_commands()
+                with result_lock:
+                    latest_commands = cmds
+            except Exception as e:
+                log.error(f"worker error: {e}")
+            await asyncio.sleep(0.05)
 
+    loop.run_until_complete(worker())
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok", "bots": BOT_COUNT}), 200
+
+
+@app.route("/command", methods=["POST"])
+def command():
     try:
-        async for raw_msg in ws:
-            try:
-                data = json.loads(raw_msg)
-                bot_manager.update_state(data)
-            except json.JSONDecodeError:
-                log.warning(f"Invalid JSON from Unity: {raw_msg[:80]}")
-    except websockets.exceptions.ConnectionClosed as e:
-        log.info(f"Unity disconnected: {e}")
-    finally:
-        connected_clients.discard(ws)
-        log.info(f"Client {addr} removed")
-
-
-async def broadcast_commands():
-    """Periodically think and broadcast commands to all connected clients."""
-    global connected_clients
-    while True:
-        await asyncio.sleep(0.1)  
-
-        if not connected_clients:
-            continue
-
-        await bot_manager.think()
-        cmds = bot_manager.flush_commands()
-        if not cmds:
-            continue
-
-        packet = json.dumps({"type": "bot_commands", "commands": cmds})
-        dead = set()
-        for ws in connected_clients:
-            try:
-                await ws.send(packet)
-            except websockets.exceptions.ConnectionClosed:
-                dead.add(ws)
-        connected_clients -= dead
-
-
-async def main():
-    log.info(f"Starting AI Bot Server on ws://{HOST}:{PORT}")
-    log.info(f"Ollama model: {OLLAMA_MODEL} @ {OLLAMA_URL}")
-    log.info(f"Managing {BOT_COUNT} bots | Decision interval: {AI_DECISION_INTERVAL}s")
-
-    async with websockets.serve(handle_client, HOST, PORT):
-        try:
-            await broadcast_commands()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            await bot_manager.close()
-            log.info("Server shut down.")
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "no json"}), 400
+        if data.get("type") == "game_state":
+            state_queue.put(data)
+        with result_lock:
+            cmds = list(latest_commands)
+        return jsonify({"commands_wrapper": {"items": cmds}}), 200
+    except Exception as e:
+        log.error(f"/command error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    threading.Thread(target=run_async_loop, daemon=True).start()
+    log.info(f"AI Bot Server on http://{HOST}:{PORT} | model={OLLAMA_MODEL} | bots={BOT_COUNT}")
+    app.run(host=HOST, port=PORT, debug=False, use_reloader=False, threaded=True)
