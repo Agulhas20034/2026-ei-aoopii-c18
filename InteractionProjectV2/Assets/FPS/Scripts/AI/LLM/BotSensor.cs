@@ -1,7 +1,6 @@
 using System.Collections.Generic;
 using UnityEngine;
 using FpsHealth = Unity.FPS.Game.Health;  
-using Unity.FPS.Game;
 
 public class EnemyContact
 {
@@ -12,10 +11,11 @@ public class EnemyContact
     public float distance;
     public float angle;
     public bool hasLOS;
+    public bool active = true;
 
     public Vector3 Position => tf != null ? tf.position : Vector3.zero;
     public Vector3 AimPoint => col != null ? col.bounds.center : Position + Vector3.up * 0.8f;
-    public bool IsValid => health != null && health.CurrentHealth > 0f && tf != null;
+    public bool IsValid => health != null && tf != null && (active ? health.CurrentHealth > 0f : true);
 }
 
 
@@ -29,6 +29,9 @@ public class BotSensor : MonoBehaviour
     public float scanInterval = 0.2f;
     [Tooltip("How often to re-scan the scene for Health objects (cheap; troopers rarely spawn).")]
     public float healthRefreshInterval = 1f;
+    [Tooltip("Also track enemies whose GameObject is disabled while 'hidden' (e.g. a retracted/cloaked turret). "
+           + "Bots advance on them but only fire once they're active and shootable.")]
+    public bool includeHidden = true;
 
     [Header("Debug")]
     public bool debugLog = true;
@@ -55,7 +58,9 @@ public class BotSensor : MonoBehaviour
         if (Time.time >= _nextHealthRefresh)
         {
             _nextHealthRefresh = Time.time + healthRefreshInterval;
-            _allHealth = FindObjectsByType<FpsHealth>(FindObjectsSortMode.None);
+            _allHealth = includeHidden
+                ? FindObjectsByType<FpsHealth>(FindObjectsInactive.Include, FindObjectsSortMode.None)
+                : FindObjectsByType<FpsHealth>(FindObjectsSortMode.None);
         }
 
         _current.Clear();
@@ -66,23 +71,23 @@ public class BotSensor : MonoBehaviour
         {
             FpsHealth h = _allHealth[i];
             if (h == null) continue;
-            if (h.CurrentHealth <= 0f) { _dbgDead++; continue; }
+            bool active = h.isActiveAndEnabled;
+            if (active && h.CurrentHealth <= 0f) { _dbgDead++; continue; }
             if (h.transform == transform || h.GetComponentInParent<BotController>() != null) { _dbgIsBot++; continue; }
-            var actor = h.GetComponentInParent<Actor>();
-            if (actor != null && actor.Affiliation == 0) { _dbgPlayer++; continue; }
+            if (h.GetComponentInParent<CharacterController>() != null) { _dbgPlayer++; continue; }  
             if (!string.IsNullOrEmpty(ignoreTag) && h.CompareTag(ignoreTag)) { _dbgPlayer++; continue; }
 
             Vector3 to = h.transform.position - transform.position;
             float dist = to.magnitude;
             if (dist > detectionRadius) { _dbgFar++; continue; }
 
-            Collider col = h.GetComponentInChildren<Collider>();
-            bool los = HasLineOfSight(col, h);
+            Collider col = active ? h.GetComponentInChildren<Collider>() : null;
+            bool los = active && HasLineOfSight(col, h);   
             if (!los) _dbgNoLOS++;
 
             _current.Add(new EnemyContact
             {
-                health = h, tf = h.transform, col = col, id = h.GetInstanceID(),
+                health = h, tf = h.transform, col = col, id = h.GetInstanceID(), active = active,
                 distance = dist,
                 angle = Vector3.SignedAngle(transform.forward, new Vector3(to.x, 0f, to.z), Vector3.up),
                 hasLOS = los
