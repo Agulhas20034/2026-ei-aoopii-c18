@@ -1027,7 +1027,11 @@ PrefabInstance:
     m_RemovedComponents: []
     m_RemovedGameObjects: []
     m_AddedGameObjects: []
-    m_AddedComponents: []
+    m_AddedComponents:
+    - targetCorrespondingSourceObject: {fileID: 2015434656898269652, guid: 76a5dd02e10c72440b2bc039d609b57f,
+        type: 3}
+      insertIndex: -1
+      addedObject: {fileID: 1433567596}
   m_SourcePrefab: {fileID: 100100000, guid: 76a5dd02e10c72440b2bc039d609b57f, type: 3}
 --- !u!4 &827742208 stripped
 Transform:
@@ -1749,6 +1753,25 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   m_Id: 6f50059d-c3ce-4a13-92b1-35e816ee2b45
+--- !u!1 &1433567585 stripped
+GameObject:
+  m_CorrespondingSourceObject: {fileID: 2015434656898269652, guid: 76a5dd02e10c72440b2bc039d609b57f,
+    type: 3}
+  m_PrefabInstance: {fileID: 826802355}
+  m_PrefabAsset: {fileID: 0}
+--- !u!114 &1433567596
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1433567585}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 00a9ed858bbbe7545ac39e1d54d2b4ea, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: fps.AI::BotDebugProbe
+  ignoreTag: Player
 --- !u!4 &1505209766 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 2141676431450117668, guid: cd17687759887a0438ee021e51abc9d9,

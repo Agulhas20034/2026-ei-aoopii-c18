@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
 using UnityEngine.Networking;
-using Unity.FPS.AI;                      
+using Unity.FPS.AI;                       
 using FpsHealth = Unity.FPS.Game.Health;
 
 
@@ -59,7 +59,7 @@ public class BotConversation : MonoBehaviour
         {
             int alive = CountAliveEnemies();
             if (alive > _peakEnemies) _peakEnemies = alive;       
-            if (_peakEnemies > 0 && alive < _peakEnemies)         
+            if (_peakEnemies > 0 && alive < _peakEnemies)        
             {
                 _started = true;
                 StartCoroutine(RegroupAndTalk());
@@ -95,43 +95,48 @@ public class BotConversation : MonoBehaviour
 
         var transcript = new List<Line>();
         int fails = 0;
-        for (int i = 0; i < turns; i++)
+        try
         {
-            var live = LivingBots();
-            if (live.Count == 0) break;                                 
-
-            var speaker = live[i % live.Count];
-            Vector3 center = GroupCenter(live);
-            foreach (var b in live) b.FacePoint(b == speaker ? center : speaker.transform.position);
-            _currentSpeaker = speaker;
-            _currentName = DisplayName(speaker);
-            _currentLine = "...";                                        
-
-            string line = null;
-            yield return StartCoroutine(RequestLine(speaker, transcript, s => line = s));
-
-            if (string.IsNullOrEmpty(line))
+            for (int i = 0; i < turns; i++)
             {
-                if (++fails >= 2) { if (debugLog) Debug.LogWarning("[Conversation] backend not responding -> ending early"); break; }
-                line = "...";
+                var live = LivingBots();
+                if (live.Count == 0) break;                                 
+
+                var speaker = live[i % live.Count];
+                Vector3 center = GroupCenter(live);
+                foreach (var b in live) b.FacePoint(b == speaker ? center : speaker.transform.position);
+                _currentSpeaker = speaker;
+                _currentName = DisplayName(speaker);
+                _currentLine = "...";                                       
+
+                string line = null;
+                yield return StartCoroutine(RequestLine(speaker, transcript, s => line = s));
+
+                if (string.IsNullOrEmpty(line))
+                {
+                    if (++fails >= 2) { if (debugLog) Debug.LogWarning("[Conversation] backend not responding -> ending early"); break; }
+                    line = "...";
+                }
+                else fails = 0;
+
+                if (speaker == null || !speaker.IsAlive) continue;           
+
+                transcript.Add(new Line { bot_id = speaker.botId, text = line });
+                _currentLine = line;
+                _transcriptDisplay.Add($"{DisplayName(speaker)}: {line}");
+                if (_transcriptDisplay.Count > 6) _transcriptDisplay.RemoveAt(0);
+                if (debugLog) Debug.Log($"[Conversation] Bot {speaker.botId}: {line}");
+
+                yield return new WaitForSeconds(lineDuration);
             }
-            else fails = 0;
-
-            if (speaker == null || !speaker.IsAlive) continue;           
-
-            transcript.Add(new Line { bot_id = speaker.botId, text = line });
-            _currentLine = line;
-            _transcriptDisplay.Add($"{DisplayName(speaker)}: {line}");
-            if (_transcriptDisplay.Count > 6) _transcriptDisplay.RemoveAt(0);
-            if (debugLog) Debug.Log($"[Conversation] Bot {speaker.botId}: {line}");
-
-            yield return new WaitForSeconds(lineDuration);
         }
-
-        _currentSpeaker = null;
-        _currentLine = "";
-        foreach (var b in _bots) if (b != null) b.EndConversation();     
-        if (debugLog) Debug.Log("[Conversation] finished; bots resume");
+        finally
+        {
+            _currentSpeaker = null;
+            _currentLine = "";
+            foreach (var b in _bots) if (b != null) b.EndConversation();
+            if (debugLog) Debug.Log("[Conversation] finished; bots resume");
+        }
     }
 
     private List<BotController> LivingBots()
@@ -186,8 +191,17 @@ public class BotConversation : MonoBehaviour
 
             if (uwr.result == UnityWebRequest.Result.Success)
             {
-                var resp = JsonUtility.FromJson<ChatResponse>(uwr.downloadHandler.text);
-                onResult(resp != null ? resp.text : null);
+                string txt = null;
+                try
+                {
+                    var resp = JsonUtility.FromJson<ChatResponse>(uwr.downloadHandler.text);
+                    txt = resp != null ? resp.text : null;
+                }
+                catch (System.Exception e)
+                {
+                    if (debugLog) Debug.LogWarning($"[Conversation] bad /chat response: {e.Message}");
+                }
+                onResult(txt);
             }
             else
             {

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()                 
+    load_dotenv()                
 except ImportError:
     pass
 
@@ -33,7 +33,7 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3.2"
 AI_DECISION_INTERVAL = 0.8  
 BOT_COUNT = 4
-FIRE_RANGE = 25.0            
+FIRE_RANGE = 25.0           
 LOG_LEVEL = logging.INFO
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
@@ -67,7 +67,7 @@ class BotState:
 class BotCommand:
     bot_id: int
     action: str = "patrol"        
-    target_id: int = -1           
+    target_id: int = -1         
     fire: bool = False
     sprint: bool = False
     action_label: str = "idle"
@@ -161,7 +161,7 @@ def _resolve_command(bot: BotState, data: dict) -> BotCommand:
     enemy = None
     if 0 <= idx < len(bot.nearby_enemies):
         enemy = bot.nearby_enemies[idx]
-    elif bot.nearby_enemies:                 
+    elif bot.nearby_enemies:                
         enemy = bot.nearby_enemies[0]
         idx = 0
 
@@ -171,15 +171,13 @@ def _resolve_command(bot: BotState, data: dict) -> BotCommand:
         los = bool(enemy.get("has_los", False))
         in_range = dist <= FIRE_RANGE
         low_hp = bot.health < 30
-
-    
         if low_hp and action == "retreat":
             fire = los and in_range            
         elif in_range and los:
             action = "engage"
             fire = True                        
         else:
-            action = "pursue"                  
+            action = "pursue"                 
             fire = False
     else:
         action = "patrol"
@@ -355,17 +353,45 @@ def _mongo_update(sid, update):
         log.warning(f"mongo update failed: {e}")
 
 
+def _load_prior_memory():
+    """Build {bot_id: 'what you did/said last session'} from the most recent prior session."""
+    out = {}
+    if sessions_col is None:
+        return out
+    try:
+        prev = list(sessions_col.find().sort("started_at", -1).limit(1))
+        if not prev:
+            return out
+        doc = prev[0]
+        kills = doc.get("stats", {}).get("kills_by_bot", {})
+        agg = {}
+        for line in doc.get("conversation", []):
+            bid = str(line.get("bot_id"))
+            agg.setdefault(bid, []).append(line.get("text", ""))
+        for bid, said in agg.items():
+            recent = " / ".join(s for s in said[-3:] if s)
+            out[bid] = f"Last battle you scored {kills.get(bid, 0)} kill(s) and said: {recent}"
+        log.info(f"[memory] loaded prior-session recall for {len(out)} bot(s)")
+        return out
+    except Exception as e:
+        log.warning(f"[memory] load failed: {e}")
+        return out
+
+
 def _new_session():
+    prior_memory = _load_prior_memory()      
     doc = {
         "_id": uuid.uuid4().hex[:12],
         "started_at": datetime.now(timezone.utc).isoformat(),
         "stats": {"enemies_killed": 0, "total_shots": 0, "shots_by_bot": {}, "kills_by_bot": {}},
         "kills": [],
         "conversation": [],
+        "bot_memory": prior_memory,           
     }
     if sessions_col is not None:
         try:
-            sessions_col.insert_one(dict(doc))
+            to_store = dict(doc)
+            sessions_col.insert_one(to_store)
         except Exception as e:
             log.warning(f"mongo insert failed: {e}")
     log.info(f"[session] started {doc['_id']}")
@@ -400,7 +426,7 @@ def _clean_line(txt: str, prev: str) -> str:
         return ""
     prevn = _norm(prev)
     chosen = None
-    for l in lines:                        
+    for l in lines:                         
         if prevn and _norm(l) == prevn:
             continue
         chosen = l
@@ -408,7 +434,7 @@ def _clean_line(txt: str, prev: str) -> str:
     if chosen is None:
         chosen = lines[-1]
     chosen = re.sub(r"^\s*bot\s*\d+\s*[:\-]\s*", "", chosen, flags=re.I).strip().strip('"').strip()
-    if prevn and _norm(chosen).startswith(prevn):  
+    if prevn and _norm(chosen).startswith(prevn): 
         parts = re.split(r"(?<=[.!?])\s+", chosen)
         parts = [p for p in parts if _norm(p) != prevn]
         chosen = " ".join(parts).strip() or chosen
@@ -449,18 +475,21 @@ def event():
     return jsonify({"ok": True}), 200
 
 
-def _generate_chat_line(speaker, count, topic, transcript_text, prev, stats_text, persona=None):
+def _generate_chat_line(speaker, count, topic, transcript_text, prev, stats_text, persona=None, prior_memory=""):
     persona = persona or {}
     name = persona.get("name") or f"Bot {speaker}"
+    seed = (persona.get("memory") or "").strip()
+    prior = (prior_memory or "").strip()
+    remember = " ".join(x for x in [seed, prior] if x) or "nothing in particular"
     system = (
         f"You are {name}, a combat robot in a squad of {count}. "
         f"Backstory: {persona.get('backstory') or 'classified'}. "
         f"Your goals: {persona.get('goals') or 'win and keep the squad alive'}. "
         f"How you feel about squadmates: {persona.get('relationships') or 'neutral'}. "
-        f"What you remember: {persona.get('memory') or 'nothing in particular'}. "
+        f"What you remember: {remember}. "
         "You just won a battle and regrouped at base. Stay in character with short military banter. "
         "Either ask a squadmate a brief question or answer the previous line; you may reference the battle "
-        "stats, your goals, or your relationships. "
+        "stats, your goals, your relationships, or what you remember from last time. "
         "Output ONLY your own new line, max 18 words. Never repeat or restate what a squadmate already said. "
         "No quotes, do not prefix your name."
     )
@@ -494,7 +523,8 @@ def chat():
     transcript_text = "\n".join(lines) if lines else "(nothing said yet)"
     prev = items[-1].get("text", "") if items else ""
     persona = data.get("persona", {}) or {}
-    text = _generate_chat_line(speaker, count, topic, transcript_text, prev, _stats_summary(sess["stats"]), persona)
+    prior = (sess.get("bot_memory") or {}).get(str(speaker), "")
+    text = _generate_chat_line(speaker, count, topic, transcript_text, prev, _stats_summary(sess["stats"]), persona, prior)
     with _session_lock:
         sess["conversation"].append({"bot_id": speaker, "text": text})
     _mongo_update(sess["_id"], {"$push": {"conversation": {"bot_id": speaker, "text": text}}})
