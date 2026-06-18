@@ -1,3 +1,6 @@
 httpx>=0.25.0
 flask>=3.0.0
 asyncio-contextmanager>=1.0.0
+python-dotenv
+pymongo 
+dnspython

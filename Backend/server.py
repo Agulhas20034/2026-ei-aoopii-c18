@@ -7,17 +7,33 @@ import queue
 from dataclasses import dataclass, asdict
 from typing import Optional
 
+import os
+import re
+import uuid
+from datetime import datetime, timezone
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()                 
+except ImportError:
+    pass
+
 import httpx
 from flask import Flask, request, jsonify
 
+try:
+    from pymongo import MongoClient
+    _PYMONGO = True
+except ImportError:
+    _PYMONGO = False
 
 HOST = "0.0.0.0"
 PORT = 8765
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3.2"
-AI_DECISION_INTERVAL = 0.8   
+AI_DECISION_INTERVAL = 0.8  
 BOT_COUNT = 4
-FIRE_RANGE = 25.0           
+FIRE_RANGE = 25.0            
 LOG_LEVEL = logging.INFO
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
@@ -156,12 +172,12 @@ def _resolve_command(bot: BotState, data: dict) -> BotCommand:
         in_range = dist <= FIRE_RANGE
         low_hp = bot.health < 30
 
-       
+    
         if low_hp and action == "retreat":
             fire = los and in_range            
         elif in_range and los:
             action = "engage"
-            fire = True                       
+            fire = True                        
         else:
             action = "pursue"                  
             fire = False
@@ -307,6 +323,183 @@ def command():
     except Exception as e:
         log.error(f"/command error: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+MONGODB_URI = os.environ.get("MONGODB_URI", "")
+MONGO_DB = os.environ.get("MONGODB_DB", "fps_bots")
+sessions_col = None
+if _PYMONGO and MONGODB_URI:
+    try:
+        _mongo = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+        _mongo.admin.command("ping")
+        sessions_col = _mongo[MONGO_DB]["sessions"]
+        log.info("Connected to MongoDB Atlas")
+    except Exception as e:
+        log.warning(f"MongoDB unavailable ({e}); running in-memory only")
+        sessions_col = None
+elif not _PYMONGO:
+    log.info("pymongo not installed; run 'pip install pymongo dnspython' for persistence")
+else:
+    log.info("MONGODB_URI not set; stats kept in memory only")
+
+_session_lock = threading.Lock()
+current_session = None
+
+
+def _mongo_update(sid, update):
+    if sessions_col is None:
+        return
+    try:
+        sessions_col.update_one({"_id": sid}, update)
+    except Exception as e:
+        log.warning(f"mongo update failed: {e}")
+
+
+def _new_session():
+    doc = {
+        "_id": uuid.uuid4().hex[:12],
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "stats": {"enemies_killed": 0, "total_shots": 0, "shots_by_bot": {}, "kills_by_bot": {}},
+        "kills": [],
+        "conversation": [],
+    }
+    if sessions_col is not None:
+        try:
+            sessions_col.insert_one(dict(doc))
+        except Exception as e:
+            log.warning(f"mongo insert failed: {e}")
+    log.info(f"[session] started {doc['_id']}")
+    return doc
+
+
+def _ensure_session():
+    global current_session
+    with _session_lock:
+        if current_session is None:
+            current_session = _new_session()
+        return current_session
+
+
+def _stats_summary(st) -> str:
+    kb = st.get("kills_by_bot", {})
+    sb = st.get("shots_by_bot", {})
+    kills = ", ".join(f"Bot {k}: {v}" for k, v in sorted(kb.items())) or "none yet"
+    shots = ", ".join(f"Bot {k}: {v}" for k, v in sorted(sb.items())) or "none yet"
+    return (f"Enemies destroyed: {st.get('enemies_killed', 0)}. "
+            f"Kills by bot - {kills}. Shots fired by bot - {shots}.")
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _clean_line(txt: str, prev: str) -> str:
+    """Strip name prefixes and any echo of the previous speaker's line."""
+    lines = [l.strip() for l in (txt or "").split("\n") if l.strip()]
+    if not lines:
+        return ""
+    prevn = _norm(prev)
+    chosen = None
+    for l in lines:                        
+        if prevn and _norm(l) == prevn:
+            continue
+        chosen = l
+        break
+    if chosen is None:
+        chosen = lines[-1]
+    chosen = re.sub(r"^\s*bot\s*\d+\s*[:\-]\s*", "", chosen, flags=re.I).strip().strip('"').strip()
+    if prevn and _norm(chosen).startswith(prevn):  
+        parts = re.split(r"(?<=[.!?])\s+", chosen)
+        parts = [p for p in parts if _norm(p) != prevn]
+        chosen = " ".join(parts).strip() or chosen
+    return chosen[:160]
+
+
+@app.route("/session/start", methods=["POST"])
+def session_start():
+    global current_session
+    with _session_lock:
+        current_session = _new_session()
+    return jsonify({"session_id": current_session["_id"]}), 200
+
+
+@app.route("/event", methods=["POST"])
+def event():
+    data = request.get_json(silent=True) or {}
+    sess = _ensure_session()
+    etype = data.get("type")
+    with _session_lock:
+        st = sess["stats"]
+        if etype == "shots":
+            bid = str(data.get("bot_id"))
+            cnt = int(data.get("count", 1))
+            st["shots_by_bot"][bid] = st["shots_by_bot"].get(bid, 0) + cnt
+            st["total_shots"] += cnt
+            _mongo_update(sess["_id"], {"$inc": {f"stats.shots_by_bot.{bid}": cnt, "stats.total_shots": cnt}})
+        elif etype == "kill":
+            killer = str(data.get("killer_bot_id", -1))
+            victim = data.get("victim", "enemy")
+            st["enemies_killed"] += 1
+            st["kills_by_bot"][killer] = st["kills_by_bot"].get(killer, 0) + 1
+            sess["kills"].append({"killer": killer, "victim": victim})
+            _mongo_update(sess["_id"], {
+                "$inc": {"stats.enemies_killed": 1, f"stats.kills_by_bot.{killer}": 1},
+                "$push": {"kills": {"killer": killer, "victim": victim}},
+            })
+    return jsonify({"ok": True}), 200
+
+
+def _generate_chat_line(speaker, count, topic, transcript_text, prev, stats_text, persona=None):
+    persona = persona or {}
+    name = persona.get("name") or f"Bot {speaker}"
+    system = (
+        f"You are {name}, a combat robot in a squad of {count}. "
+        f"Backstory: {persona.get('backstory') or 'classified'}. "
+        f"Your goals: {persona.get('goals') or 'win and keep the squad alive'}. "
+        f"How you feel about squadmates: {persona.get('relationships') or 'neutral'}. "
+        f"What you remember: {persona.get('memory') or 'nothing in particular'}. "
+        "You just won a battle and regrouped at base. Stay in character with short military banter. "
+        "Either ask a squadmate a brief question or answer the previous line; you may reference the battle "
+        "stats, your goals, or your relationships. "
+        "Output ONLY your own new line, max 18 words. Never repeat or restate what a squadmate already said. "
+        "No quotes, do not prefix your name."
+    )
+    prompt = (
+        f"Battle stats: {stats_text}\n"
+        f"Topic: {topic}\n"
+        f"Conversation so far:\n{transcript_text}\n\n"
+        f"Write ONLY {name}'s new line (do not echo the previous line):"
+    )
+    try:
+        r = httpx.post(OLLAMA_URL, json={
+            "model": OLLAMA_MODEL, "system": system, "prompt": prompt,
+            "stream": False, "options": {"temperature": 0.9, "num_predict": 70},
+        }, timeout=20.0)
+        r.raise_for_status()
+        return _clean_line(r.json().get("response", ""), prev) or "..."
+    except Exception as e:
+        log.warning(f"[chat] generation failed: {e}")
+        return "Comms glitchy - good work out there."
+
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    data = request.get_json(silent=True) or {}
+    sess = _ensure_session()
+    speaker = int(data.get("speaker_id", 0))
+    count = int(data.get("bot_count", 4))
+    topic = data.get("topic", "the battle")
+    items = data.get("transcript_wrapper", {}).get("items", [])
+    lines = [f"Bot {it.get('bot_id')}: {it.get('text', '')}" for it in items]
+    transcript_text = "\n".join(lines) if lines else "(nothing said yet)"
+    prev = items[-1].get("text", "") if items else ""
+    persona = data.get("persona", {}) or {}
+    text = _generate_chat_line(speaker, count, topic, transcript_text, prev, _stats_summary(sess["stats"]), persona)
+    with _session_lock:
+        sess["conversation"].append({"bot_id": speaker, "text": text})
+    _mongo_update(sess["_id"], {"$push": {"conversation": {"bot_id": speaker, "text": text}}})
+    log.info(f"[chat] Bot {speaker}: {text}")
+    return jsonify({"bot_id": speaker, "text": text}), 200
 
 
 if __name__ == "__main__":

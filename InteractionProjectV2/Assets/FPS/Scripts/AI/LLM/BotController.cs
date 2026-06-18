@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AI;
 using Unity.FPS.AI;                       
@@ -16,7 +17,7 @@ public class BotController : MonoBehaviour
     [Header("Movement")]
     public float walkSpeed = 4f;
     public float sprintSpeed = 7f;
-    public float engageRange = 12f;    
+    public float engageRange = 12f;     
     public float retreatDistance = 12f;
     public float wanderRadius = 15f;
     public Transform[] patrolPoints;
@@ -38,6 +39,16 @@ public class BotController : MonoBehaviour
     public bool FiringNow { get; private set; }
     public string StatusLine { get; private set; } = "init";
 
+    public bool ConversationHold { get; private set; }
+    public float regroupArriveDist = 2.5f;
+    private Vector3 _regroupPoint;
+    private Vector3 _facePoint;
+    private bool _hasFace;
+    public bool AtRegroup => Vector3.Distance(transform.position, _regroupPoint) <= regroupArriveDist;
+    public void BeginRegroup(Vector3 point) { ConversationHold = true; _regroupPoint = point; }
+    public void EndConversation() { ConversationHold = false; _hasFace = false; }
+    public void FacePoint(Vector3 p) { _facePoint = p; _hasFace = true; }
+
     private int _preferredTargetId = -1;
     private bool _backendRetreat;
     private bool _backendSprint;
@@ -46,6 +57,9 @@ public class BotController : MonoBehaviour
     private NavMeshAgent _agent;
     private FpsHealth _health;
     private BotSensor _sensor;
+    private BotProfile _profile;
+    private List<BotController> _allies;
+    private float _retreatAtFraction = 0f;
     private int _patrolIndex;
     private Vector3 _wanderPoint;
     private bool _hasWander;
@@ -59,8 +73,25 @@ public class BotController : MonoBehaviour
         _agent = GetComponent<NavMeshAgent>();
         _health = GetComponent<FpsHealth>();
         _sensor = GetComponent<BotSensor>();
+        _profile = GetComponent<BotProfile>();
         if (_agent != null) _agent.updateRotation = false;
+        ApplyProfile();
     }
+
+    void Start()
+    {
+        _allies = new List<BotController>(FindObjectsByType<BotController>(FindObjectsSortMode.None));
+    }
+
+    private void ApplyProfile()
+    {
+        if (_profile == null) return;
+        engageRange = Mathf.Lerp(16f, 5f, _profile.aggression);          
+        _retreatAtFraction = Mathf.Lerp(0.05f, 0.6f, _profile.caution);  
+    }
+
+    private float HealthFraction => (_health != null && _health.MaxHealth > 0f)
+        ? _health.CurrentHealth / _health.MaxHealth : 1f;
 
     public void ApplyCommand(string action, int targetId, bool fire, bool sprint)
     {
@@ -75,6 +106,7 @@ public class BotController : MonoBehaviour
     {
         if (_agent == null || !_agent.isOnNavMesh) { StatusLine = "no NavMesh!"; return; }
         if (!IsAlive) { _agent.isStopped = true; StatusLine = "dead"; return; }
+        if (ConversationHold) { HandleRegroup(); return; }
 
         EnemyContact target = ResolveTarget();
         CurrentTargetId = target != null ? target.id : -1;
@@ -87,7 +119,9 @@ public class BotController : MonoBehaviour
 
         FiringNow = false;
 
-        if (target != null && _backendRetreat)
+        bool wantRetreat = _backendRetreat || HealthFraction < _retreatAtFraction;
+
+        if (target != null && wantRetreat)
         {
             CurrentAction = BotAction.Retreat;
             Retreat(target);
@@ -100,13 +134,13 @@ public class BotController : MonoBehaviour
             {
                 CurrentAction = BotAction.Engage;
                 _agent.speed = walkSpeed;
-                Drive(target.Position, engageRange);        
-                AimAt(target, allowFire: true);              
+                Drive(target.Position, engageRange);          
+                AimAt(target, allowFire: true);               
             }
             else
             {
                 CurrentAction = BotAction.Pursue;
-                _agent.speed = sprintSpeed;                  
+                _agent.speed = sprintSpeed;                   
                 Drive(target.Position, 1.5f);
                 AimAt(target, allowFire: false);
                 StatusLine = target.hasLOS ? $"pursue d={target.distance:F1} (out of range)"
@@ -142,7 +176,27 @@ public class BotController : MonoBehaviour
             var t = _sensor.GetById(_preferredTargetId);
             if (t != null && t.IsValid) return t;
         }
+        if (_profile != null && _profile.teamwork > 0.5f)
+        {
+            var focus = FocusFireTarget();
+            if (focus != null) return focus;
+        }
         return _sensor.GetClosest();
+    }
+
+    private EnemyContact FocusFireTarget()
+    {
+        if (_allies == null) return null;
+        foreach (var ally in _allies)
+        {
+            if (ally == null || ally == this || !ally.IsAlive) continue;
+            if (_profile.BondTo(ally.botId) <= 0f) continue;
+            int tid = ally.CurrentTargetId;
+            if (tid == -1) continue;
+            var c = _sensor.GetById(tid);
+            if (c != null && c.IsValid) return c;
+        }
+        return null;
     }
 
     private void Drive(Vector3 worldPos, float stopDist)
@@ -150,7 +204,7 @@ public class BotController : MonoBehaviour
         _agent.stoppingDistance = stopDist;
         _agent.isStopped = false;
         if (NavMesh.SamplePosition(worldPos, out NavMeshHit hit, 5f, NavMesh.AllAreas))
-            _enemy.SetNavDestination(hit.position);        
+            _enemy.SetNavDestination(hit.position);       
         else
             _enemy.SetNavDestination(worldPos);
     }
@@ -174,6 +228,7 @@ public class BotController : MonoBehaviour
         if (allowFire)
         {
             FiringNow = _enemy.TryAtack(aim);
+            if (FiringNow && GameStats.Instance != null) GameStats.Instance.ReportShot(botId);
             StatusLine = FiringNow ? $"FIRING d={target.distance:F1}" : $"in range d={target.distance:F1} (weapon cooling)";
         }
     }
@@ -201,6 +256,25 @@ public class BotController : MonoBehaviour
                 _hasWander = true;
                 _enemy.SetNavDestination(_wanderPoint);
             }
+        }
+    }
+
+    private void HandleRegroup()
+    {
+        _agent.speed = walkSpeed;
+        if (!AtRegroup)
+        {
+            _agent.stoppingDistance = 0.5f;
+            _agent.isStopped = false;
+            if (NavMesh.SamplePosition(_regroupPoint, out NavMeshHit hit, 5f, NavMesh.AllAreas))
+                _enemy.SetNavDestination(hit.position);
+            StatusLine = "regrouping";
+        }
+        else
+        {
+            _agent.isStopped = true;
+            if (_hasFace) _enemy.OrientTowards(_facePoint);
+            StatusLine = "regrouped (talking)";
         }
     }
 
