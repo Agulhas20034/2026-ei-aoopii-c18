@@ -224,11 +224,7 @@ PrefabInstance:
     m_RemovedComponents: []
     m_RemovedGameObjects: []
     m_AddedGameObjects: []
-    m_AddedComponents:
-    - targetCorrespondingSourceObject: {fileID: 2015434656898269652, guid: 76a5dd02e10c72440b2bc039d609b57f,
-        type: 3}
-      insertIndex: -1
-      addedObject: {fileID: 1512808689}
+    m_AddedComponents: []
   m_SourcePrefab: {fileID: 100100000, guid: 76a5dd02e10c72440b2bc039d609b57f, type: 3}
 --- !u!1001 &141648175
 PrefabInstance:
@@ -301,11 +297,7 @@ PrefabInstance:
     m_RemovedComponents: []
     m_RemovedGameObjects: []
     m_AddedGameObjects: []
-    m_AddedComponents:
-    - targetCorrespondingSourceObject: {fileID: 2015434656898269652, guid: 76a5dd02e10c72440b2bc039d609b57f,
-        type: 3}
-      insertIndex: -1
-      addedObject: {fileID: 2024759319}
+    m_AddedComponents: []
   m_SourcePrefab: {fileID: 100100000, guid: 76a5dd02e10c72440b2bc039d609b57f, type: 3}
 --- !u!4 &218425204 stripped
 Transform:
@@ -566,11 +558,7 @@ PrefabInstance:
     m_RemovedComponents: []
     m_RemovedGameObjects: []
     m_AddedGameObjects: []
-    m_AddedComponents:
-    - targetCorrespondingSourceObject: {fileID: 2015434656898269652, guid: 76a5dd02e10c72440b2bc039d609b57f,
-        type: 3}
-      insertIndex: -1
-      addedObject: {fileID: 1925721316}
+    m_AddedComponents: []
   m_SourcePrefab: {fileID: 100100000, guid: 76a5dd02e10c72440b2bc039d609b57f, type: 3}
 --- !u!4 &475488566 stripped
 Transform:
@@ -1039,11 +1027,7 @@ PrefabInstance:
     m_RemovedComponents: []
     m_RemovedGameObjects: []
     m_AddedGameObjects: []
-    m_AddedComponents:
-    - targetCorrespondingSourceObject: {fileID: 2015434656898269652, guid: 76a5dd02e10c72440b2bc039d609b57f,
-        type: 3}
-      insertIndex: -1
-      addedObject: {fileID: 1540436144}
+    m_AddedComponents: []
   m_SourcePrefab: {fileID: 100100000, guid: 76a5dd02e10c72440b2bc039d609b57f, type: 3}
 --- !u!4 &827742208 stripped
 Transform:
@@ -1771,41 +1755,6 @@ Transform:
     type: 3}
   m_PrefabInstance: {fileID: 2729281214911784181}
   m_PrefabAsset: {fileID: 0}
---- !u!1 &1512808688 stripped
-GameObject:
-  m_CorrespondingSourceObject: {fileID: 2015434656898269652, guid: 76a5dd02e10c72440b2bc039d609b57f,
-    type: 3}
-  m_PrefabInstance: {fileID: 136741596}
-  m_PrefabAsset: {fileID: 0}
---- !u!114 &1512808689
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1512808688}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 694bb2d0449271e4494f2ae1875f948c, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: fps.AI::BotProfile
-  characterName: Luis
-  backstory: team player
-  goals: win the match
-  memory: previous fights
-  relationships:
-  - botId: 0
-    bond: 0
-    note: 
-  - botId: 1
-    bond: 0
-    note: 
-  - botId: 2
-    bond: 0
-    note: 
-  aggression: 0.5
-  caution: 0.3
-  teamwork: 0.5
 --- !u!1001 &1525167935
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -1891,41 +1840,6 @@ Transform:
     type: 3}
   m_PrefabInstance: {fileID: 2729281214462286338}
   m_PrefabAsset: {fileID: 0}
---- !u!1 &1540436143 stripped
-GameObject:
-  m_CorrespondingSourceObject: {fileID: 2015434656898269652, guid: 76a5dd02e10c72440b2bc039d609b57f,
-    type: 3}
-  m_PrefabInstance: {fileID: 826802355}
-  m_PrefabAsset: {fileID: 0}
---- !u!114 &1540436144
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1540436143}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 694bb2d0449271e4494f2ae1875f948c, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: fps.AI::BotProfile
-  characterName: AI-first
-  backstory: talkative
-  goals: win match
-  memory: 
-  relationships:
-  - botId: 1
-    bond: 0
-    note: 
-  - botId: 2
-    bond: 0
-    note: 
-  - botId: 3
-    bond: 0
-    note: 
-  aggression: 0.5
-  caution: 0.3
-  teamwork: 0.5
 --- !u!4 &1562200519 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 2141676431450117668, guid: cd17687759887a0438ee021e51abc9d9,
@@ -2424,82 +2338,12 @@ Transform:
     type: 3}
   m_PrefabInstance: {fileID: 2729281214105776702}
   m_PrefabAsset: {fileID: 0}
---- !u!1 &1925721315 stripped
-GameObject:
-  m_CorrespondingSourceObject: {fileID: 2015434656898269652, guid: 76a5dd02e10c72440b2bc039d609b57f,
-    type: 3}
-  m_PrefabInstance: {fileID: 420670789}
-  m_PrefabAsset: {fileID: 0}
---- !u!114 &1925721316
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1925721315}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 694bb2d0449271e4494f2ae1875f948c, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: fps.AI::BotProfile
-  characterName: Bruno
-  backstory: speedrunner
-  goals: win match
-  memory: 
-  relationships:
-  - botId: 0
-    bond: 0
-    note: 
-  - botId: 2
-    bond: 0
-    note: 
-  - botId: 3
-    bond: 0
-    note: 
-  aggression: 0.5
-  caution: 0.3
-  teamwork: 0.5
 --- !u!4 &1935557591 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 4477206535605542485, guid: 509d754db50222f46b673c4778f267e4,
     type: 3}
   m_PrefabInstance: {fileID: 1647969997}
   m_PrefabAsset: {fileID: 0}
---- !u!1 &2024759318 stripped
-GameObject:
-  m_CorrespondingSourceObject: {fileID: 2015434656898269652, guid: 76a5dd02e10c72440b2bc039d609b57f,
-    type: 3}
-  m_PrefabInstance: {fileID: 141648175}
-  m_PrefabAsset: {fileID: 0}
---- !u!114 &2024759319
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2024759318}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 694bb2d0449271e4494f2ae1875f948c, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: fps.AI::BotProfile
-  characterName: Pedro
-  backstory: agressive
-  goals: win match
-  memory: 
-  relationships:
-  - botId: 0
-    bond: 0
-    note: 
-  - botId: 1
-    bond: 0
-    note: 
-  - botId: 3
-    bond: 0
-    note: 
-  aggression: 0.5
-  caution: 0.3
-  teamwork: 0.5
 --- !u!1001 &2088243334
 PrefabInstance:
   m_ObjectHideFlags: 0

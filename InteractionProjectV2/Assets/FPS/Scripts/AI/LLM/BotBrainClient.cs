@@ -11,7 +11,7 @@ public class BotBrainClient : MonoBehaviour
     [Header("Backend")]
     public string serverUrl = "http://localhost:8765/command";
     public float pollInterval = 0.25f;
-    public float requestTimeout = 5f;
+    public float requestTimeout = 50f;
 
     [Header("Debug")]
     public bool debugLog = true;
